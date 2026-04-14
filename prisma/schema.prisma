@@ -1,0 +1,64 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  user_key             String   @id
+  target_job_direction String
+  work_type            String
+  target_company_type  String
+  preparation_stage    String
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+
+  skills        Skill[]
+  projects      Project[]
+  weakness_tags WeaknessTag[]
+}
+
+model Skill {
+  id                String   @id @default(cuid())
+  user_key          String
+  skill_name        String
+  proficiency_level Int
+  proficiency_desc  String
+  need_strengthen   Boolean
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  profile Profile @relation(fields: [user_key], references: [user_key], onDelete: Cascade)
+
+  @@index([user_key])
+}
+
+model Project {
+  id             String   @id @default(cuid())
+  user_key       String
+  project_name   String
+  project_status String
+  tags_json      String
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  profile Profile @relation(fields: [user_key], references: [user_key], onDelete: Cascade)
+
+  @@index([user_key])
+}
+
+model WeaknessTag {
+  id         String   @id @default(cuid())
+  user_key   String
+  tag_name   String
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  profile Profile @relation(fields: [user_key], references: [user_key], onDelete: Cascade)
+
+  @@index([user_key])
+  @@unique([user_key, tag_name])
+}
