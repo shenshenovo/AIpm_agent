@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { TopNav } from "@/components/top-nav";
+import type { ApiResponse } from "@/types/capability-profile";
+import type { JDAnalysisResponse } from "@/types/jd-analysis";
 
 type AnalysisResult = {
   rolePositioning: {
@@ -36,6 +38,8 @@ type GapAnalysis = {
 };
 
 const maxJdLength = 1000;
+const studyPlanInputStorageKey = "ai_pm_agent.workflow2_result";
+const userKey = "user001";
 
 const abilityCatalog: Record<string, AbilityCategory> = {
   product: {
@@ -212,8 +216,9 @@ export default function JDAnalysisPage() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGeneratingGap, setIsGeneratingGap] = useState(false);
   const [error, setError] = useState("");
+  const [fallbackNotice, setFallbackNotice] = useState("");
 
-  const canAnalyze = jdText.trim().length > 0 && !isAnalyzing;
+  const canAnalyze = jdText.trim().length > 0 && jobType.trim().length > 0 && !isAnalyzing;
   const canGoToStudyPlan = Boolean(analysisResult && gapAnalysis && !isGeneratingGap);
 
   const positioningTags = useMemo(() => analysisResult?.rolePositioning.tags ?? [], [analysisResult]);
@@ -223,20 +228,41 @@ export default function JDAnalysisPage() {
       return;
     }
 
+    if (!jobType.trim()) {
+      setError("请先填写岗位类型。Coze Workflow1 中 job_type 是必填参数。");
+      return;
+    }
+
     setError("");
+    setFallbackNotice("");
     setIsAnalyzing(true);
     setGapAnalysis(null);
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 450));
-      const nextAnalysis = analyzeJd(jdText, jobType, companyType);
-      setAnalysisResult(nextAnalysis);
-
       setIsGeneratingGap(true);
-      await new Promise((resolve) => setTimeout(resolve, 700));
-      setGapAnalysis(buildGapAnalysis(nextAnalysis));
+      const response = await fetchJson<JDAnalysisResponse>("/api/jd-analysis", {
+        method: "POST",
+        body: JSON.stringify({
+          jd_text: jdText,
+          job_type: jobType,
+          company_type: companyType,
+          user_key: userKey
+        })
+      });
+
+      setAnalysisResult(response.analysisResult);
+      setGapAnalysis(response.gapAnalysis as GapAnalysis);
+      setFallbackNotice(response.fallbackNotice ?? "");
+      saveStudyPlanInput({
+        workflow1_result: response.workflow1_result,
+        workflow2_result: response.workflow2_result,
+        jd_text: jdText,
+        job_type: jobType,
+        company_type: companyType
+      });
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "JD 分析失败，请稍后重试。");
+      setFallbackNotice("");
     } finally {
       setIsAnalyzing(false);
       setIsGeneratingGap(false);
@@ -284,7 +310,7 @@ export default function JDAnalysisPage() {
                 <input
                   value={jobType}
                   onChange={(event) => setJobType(event.target.value)}
-                  placeholder="eg实习，非必填"
+                  placeholder="eg 实习，必填"
                   className="h-12 w-full rounded-2xl border border-[#d8dbe3] bg-white px-4 text-sm outline-none transition focus:border-[#9ab3e8]"
                 />
               </label>
@@ -310,6 +336,7 @@ export default function JDAnalysisPage() {
             </div>
 
             {error ? <p className="mt-2 text-sm text-[#c24545]">{error}</p> : null}
+            {fallbackNotice ? <p className="mt-2 text-sm text-[#8a6c20]">{fallbackNotice}</p> : null}
           </section>
 
           <section className="rounded-[24px] border border-line bg-white p-4 shadow-card">
@@ -318,7 +345,9 @@ export default function JDAnalysisPage() {
               <div className="mt-3 grid gap-3 xl:grid-cols-[1.05fr_1fr_1fr]">
                 <article className="rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4">
                   <h3 className="text-base font-semibold">岗位定位</h3>
-                  <p className="mt-2 text-sm font-medium text-ink">{analysisResult.rolePositioning.title}</p>
+                  {analysisResult.rolePositioning.title ? (
+                    <p className="mt-2 text-sm font-medium text-ink">{analysisResult.rolePositioning.title}</p>
+                  ) : null}
                   <p className="mt-2 text-sm leading-6 text-muted">{analysisResult.rolePositioning.description}</p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     {positioningTags.map((tag) => (
@@ -364,25 +393,22 @@ export default function JDAnalysisPage() {
           <section className="rounded-[24px] border border-line bg-white p-4 shadow-card">
             <h2 className="text-xl font-semibold">能力分类</h2>
             {analysisResult ? (
-              <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <div className="mt-3 grid gap-3 xl:grid-cols-3">
                 {analysisResult.abilityCategories.map((item) => (
-                  <article key={item.title} className="rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4">
+                  <article key={item.title} className="order-2 rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4 xl:col-span-2">
                     <h3 className="text-base font-semibold">{item.title}</h3>
-                    <p className="mt-2 text-sm leading-6 text-muted">{item.description}</p>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {item.tags.map((tag) => (
-                        <span
-                          key={tag}
-                          className="rounded-full border border-[#ece6d2] bg-[#fff8e8] px-3 py-1 text-xs text-[#8b6b1f]"
-                        >
-                          {tag}
-                        </span>
+                    <ul className="mt-2 space-y-2 text-sm leading-6 text-muted">
+                      {splitAbilityDescription(item.description).map((ability) => (
+                        <li key={ability} className="flex gap-2">
+                          <span className="mt-[9px] h-1.5 w-1.5 flex-none rounded-full bg-[#8b6b1f]" />
+                          <span>{ability}</span>
+                        </li>
                       ))}
-                    </div>
+                    </ul>
                   </article>
                 ))}
 
-                <article className="rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4">
+                <article className="order-1 rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4">
                   <h3 className="text-base font-semibold">最值得优先准备的 {analysisResult.coreAbilities.length} 项核心能力</h3>
                   <ol className="mt-3 space-y-2 text-sm leading-6 text-muted">
                     {analysisResult.coreAbilities.map((item, index) => (
@@ -408,7 +434,7 @@ export default function JDAnalysisPage() {
             </div>
 
             {gapAnalysis ? (
-              <div className="mt-3 grid gap-3 xl:grid-cols-[0.95fr_1.25fr]">
+              <div className="mt-3 grid gap-3">
                 <article className="rounded-2xl border border-[#f0e2bf] bg-white/90 p-4">
                   <h3 className="text-base font-semibold">总体判断</h3>
                   <p className="mt-2 text-sm font-medium text-ink">{gapAnalysis.conclusion}</p>
@@ -422,7 +448,7 @@ export default function JDAnalysisPage() {
                       <div key={item.name} className="rounded-2xl border border-[#ece4cf] bg-[#fffdfa] p-4">
                         <div className="flex items-start justify-between gap-3">
                           <h4 className="text-sm font-semibold text-ink">{item.name}</h4>
-                          <span className="rounded-full bg-[#fff2c8] px-3 py-1 text-xs text-[#8b6b1f]">
+                          <span className={`inline-flex min-w-[84px] justify-center rounded-full px-3 py-1 text-center text-xs whitespace-nowrap ${getPriorityBadgeClass(item.priority)}`}>
                             {item.priority}
                           </span>
                         </div>
@@ -464,6 +490,73 @@ export default function JDAnalysisPage() {
       </main>
     </div>
   );
+}
+
+async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  const response = await fetch(input, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {})
+    }
+  });
+  const result = (await response.json()) as ApiResponse<T>;
+  if (!response.ok || !result.success) {
+    throw new Error(result.success ? "Request failed." : result.error);
+  }
+  return result.data;
+}
+
+function splitAbilityDescription(description: string) {
+  const numberedItems = description
+    .split(/(?=\s*\d+[.．、]\s*)/g)
+    .map((item) => item.replace(/^\s*\d+[.．、]\s*/, "").trim())
+    .filter(Boolean);
+
+  if (numberedItems.length > 1) {
+    return numberedItems;
+  }
+
+  return description
+    .split(/[；;]/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function getPriorityBadgeClass(priority: string) {
+  if (priority.includes("高")) {
+    return "bg-[#fde2e2] text-[#9f1d1d]";
+  }
+
+  if (priority.includes("中")) {
+    return "bg-[#fff2c8] text-[#8b6b1f]";
+  }
+
+  return "bg-[#eef1f6] text-[#4d5968]";
+}
+
+function saveStudyPlanInput(input: {
+  workflow1_result: string;
+  workflow2_result: string;
+  jd_text: string;
+  job_type: string;
+  company_type: string;
+}) {
+  if (!input.workflow2_result.trim()) {
+    return;
+  }
+
+  try {
+    window.sessionStorage.setItem(
+      studyPlanInputStorageKey,
+      JSON.stringify({
+        ...input,
+        savedAt: new Date().toISOString()
+      })
+    );
+  } catch {
+    // Session storage is only a handoff between pages; analysis results still render without it.
+  }
 }
 
 function EmptyState({ text, tone = "default" }: { text: string; tone?: "default" | "warm" }) {

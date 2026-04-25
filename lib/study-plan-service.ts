@@ -22,6 +22,9 @@ type CozeWorkflow3RequestBody = {
 
 type CozeWorkflow3RawResponse = unknown;
 
+const cozeWorkflow3TimeoutMs = 15000;
+const maxStudyPlanTaskLength = 42;
+
 const mockTaskTemplates = [
   ["梳理核心岗位要求", "阅读 3 份 AI PM JD", "整理能力差距", "输出学习笔记"],
   ["拆解竞品案例", "整理产品分析模板", "补齐指标理解", "复盘学习结果"],
@@ -47,8 +50,19 @@ export async function generateStudyPlan(input: StudyPlanRequest): Promise<StudyP
     return buildMockStudyPlan(sanitizedInput);
   }
 
-  const rawResponse = await callCozeWorkflow3(sanitizedInput, env);
-  return parseCozeWorkflow3Response(rawResponse);
+  try {
+    const rawResponse = await callCozeWorkflow3(sanitizedInput, env);
+    return parseCozeWorkflow3Response(rawResponse);
+  } catch (error) {
+    if (canUseLocalFallback(error)) {
+      console.warn("[study-plan-service] Coze Workflow3 unavailable, falling back to local study plan.", {
+        error: getErrorMessage(error)
+      });
+      return buildMockStudyPlan(sanitizedInput);
+    }
+
+    throw error;
+  }
 }
 
 export async function callCozeWorkflow3(
@@ -165,7 +179,9 @@ async function executeCozeWorkflow3Request({
   requestBody: CozeWorkflow3RequestBody;
   mode: CozeRequestMode;
 }): Promise<CozeWorkflow3RawResponse> {
-  // TODO: replace with real Coze Workflow3 API call
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), cozeWorkflow3TimeoutMs);
+
   const response = await fetch(apiBaseUrl, {
     method: "POST",
     headers: {
@@ -173,8 +189,9 @@ async function executeCozeWorkflow3Request({
       "Content-Type": "application/json"
     },
     body: JSON.stringify(requestBody),
-    cache: "no-store"
-  });
+    cache: "no-store",
+    signal: controller.signal
+  }).finally(() => clearTimeout(timeoutId));
 
   if (!response.ok) {
     const errorText = await safeReadText(response);
@@ -420,7 +437,7 @@ function normalizeDailyPlanItem(item: unknown, index: number): DailyPlanItem | n
   return {
     day: Math.max(1, Math.round(day)),
     hours: Math.max(0.5, Math.round(hours * 10) / 10),
-    tasks: tasks.map((task) => task.slice(0, 15))
+    tasks: tasks.map(normalizeTaskText)
   };
 }
 
@@ -513,28 +530,128 @@ function normalizeStudyPlanRequest(input: StudyPlanRequest): StudyPlanRequest {
   return {
     workflow2_result: input.workflow2_result.trim(),
     study_days: Math.max(1, Math.min(14, Math.round(input.study_days))),
-    daily_hours: Math.max(0.5, Math.round(input.daily_hours * 10) / 10)
+    daily_hours: Math.max(1, Math.min(24, Math.round(input.daily_hours)))
   };
 }
 
 function buildMockStudyPlan(input: StudyPlanRequest): StudyPlanResponse {
+  const focusAreas = extractFocusAreas(input.workflow2_result);
+  const focusNames = focusAreas.map((item) => item.name).join("、");
   const dailyPlans: DailyPlanItem[] = Array.from({ length: input.study_days }, (_, index) => {
-    const template = mockTaskTemplates[index % mockTaskTemplates.length];
+    const focusArea = focusAreas[index % focusAreas.length];
+    const template = focusArea.tasks.length > 0 ? focusArea.tasks : mockTaskTemplates[index % mockTaskTemplates.length];
     const taskCount = Math.max(3, Math.min(5, Math.round(input.daily_hours + 1)));
 
     return {
       day: index + 1,
-      hours: Math.max(0.5, Math.round((input.daily_hours + ((index % 3) - 1) * 0.2) * 10) / 10),
-      tasks: template.slice(0, taskCount).map((item) => item.slice(0, 15))
+      hours: Math.max(1, Math.round(input.daily_hours + ((index % 3) - 1))),
+      tasks: template.slice(0, taskCount).map(normalizeTaskText)
     };
   });
 
   return {
-    summary: `结合当前能力分析结果，在 ${input.study_days} 天内围绕核心技能补齐、项目推进和表达训练三条主线完成强化。`,
-    scheduleAdvice: `建议每天投入约 ${input.daily_hours} 小时，优先完成 1 项主任务，再安排 1 项复盘或输出任务。`,
+    summary: `结合当前差距项分析，在 ${input.study_days} 天内优先围绕${focusNames}完成补齐，并把学习结果转成面试可表达的作品或案例。`,
+    scheduleAdvice: `建议每天投入约 ${input.daily_hours} 小时，先处理 1 个高优先级差距项，再安排复盘、输出和口述训练。`,
     dailyPlans,
-    suggestions: []
+    suggestions: [
+      "每天至少沉淀一个可展示产出",
+      "把学习内容改写成面试回答",
+      "优先处理高优先级差距项"
+    ]
   };
+}
+
+function extractFocusAreas(workflow2Result: string) {
+  const text = workflow2Result.toLowerCase();
+  const focusAreas: Array<{ name: string; tasks: string[] }> = [];
+
+  if (includesAny(text, ["ai", "agent", "llm", "prompt", "rag"]) || includesAny(workflow2Result, ["大模型", "智能体", "模型"])) {
+    focusAreas.push({
+      name: "AI产品理解",
+      tasks: [
+        "画一张Agent工作流图并标出输入输出",
+        "拆解1个AI产品案例：用户、场景、模型边界",
+        "写5条Prompt改写前后对比和效果原因",
+        "整理一段AI产品面试回答并录音复盘"
+      ]
+    });
+  }
+
+  if (includesAny(text, ["prd", "prototype"]) || includesAny(workflow2Result, ["产品", "需求", "用户", "竞品", "原型", "方案"])) {
+    focusAreas.push({
+      name: "产品基础能力",
+      tasks: [
+        "把目标JD拆成3类用户需求和优先级",
+        "补一页PRD：背景、目标、流程、验收口径",
+        "对比2个竞品功能并写出差异判断",
+        "用一句话说明方案取舍和不做什么"
+      ]
+    });
+  }
+
+  if (includesAny(text, ["sql", "excel", "data", "badcase"]) || includesAny(workflow2Result, ["数据", "指标", "归因", "评测"])) {
+    focusAreas.push({
+      name: "数据分析能力",
+      tasks: [
+        "拆1个核心指标：定义、分母分子、影响因素",
+        "练3道SQL题并记录错因和查询思路",
+        "用漏斗法分析一个badcase并写归因链路",
+        "输出一页数据结论：发现、判断、下一步"
+      ]
+    });
+  }
+
+  if (includesAny(workflow2Result, ["项目", "推进", "协作", "沟通", "复盘", "表达", "STAR"])) {
+    focusAreas.push({
+      name: "项目表达能力",
+      tasks: [
+        "选1个项目写清STAR四段和个人职责",
+        "补充3个关键动作：怎么推进、怎么协作",
+        "量化项目结果：指标、反馈或交付物证据",
+        "做2分钟项目口述并删掉空泛描述"
+      ]
+    });
+  }
+
+  if (includesAny(workflow2Result, ["行业", "市场", "业务", "用户研究", "调研"])) {
+    focusAreas.push({
+      name: "行业用户认知",
+      tasks: [
+        "调研3个同类产品并记录核心定位",
+        "整理目标用户画像：场景、痛点、付费动机",
+        "拆一个业务模式：供给、需求、变现路径",
+        "写3条行业观点并准备面试追问答案"
+      ]
+    });
+  }
+
+  if (includesAny(workflow2Result, ["学历", "专业", "实习", "到岗", "资质", "证明"])) {
+    focusAreas.push({
+      name: "基础资质证明",
+      tasks: [
+        "补齐简历顶部信息：学校、专业、到岗时间",
+        "确认每周实习天数并写入自我介绍",
+        "整理工具证明：PRD、原型、SQL或作品链接",
+        "优化30秒开场白，突出匹配岗位的证据"
+      ]
+    });
+  }
+
+  if (focusAreas.length > 0) {
+    return focusAreas;
+  }
+
+  return [
+    {
+      name: "岗位匹配表达",
+      tasks: [
+        "把JD拆成5个能力点并标注高低优先级",
+        "为每个能力点匹配1段经历或作品证据",
+        "准备3个高频问题答案并写出关键词",
+        "复盘表达短板：删掉空话，补充具体动作"
+      ]
+    }
+  ];
 }
 
 function parseWorkflow3ResultText(text: string): Omit<StudyPlanResponse, "suggestions"> {
@@ -629,7 +746,7 @@ function parseTasksFromDayBlock(block: string) {
     .filter(Boolean);
 
   if (splitByOrderedMarks.length > 1) {
-    return splitByOrderedMarks.slice(0, 5).map((item) => item.slice(0, 15));
+    return splitByOrderedMarks.slice(0, 5).map(normalizeTaskText);
   }
 
   const bulletTasks = taskSection
@@ -637,7 +754,7 @@ function parseTasksFromDayBlock(block: string) {
     .map((line) => line.trim())
     .filter((line) => line.startsWith("-"))
     .map((line) => normalizeInlineText(line.replace(/^-+\s*/, "")))
-    .map((line) => line.slice(0, 15))
+    .map(normalizeTaskText)
     .filter(Boolean);
 
   if (bulletTasks.length > 0) {
@@ -649,11 +766,19 @@ function parseTasksFromDayBlock(block: string) {
     .map((line) => normalizeInlineText(line))
     .filter(Boolean)
     .slice(0, 5)
-    .map((line) => line.slice(0, 15));
+    .map(normalizeTaskText);
 }
 
 function normalizeInlineText(text: string) {
   return text.replace(/\s+/g, " ").trim();
+}
+
+function normalizeTaskText(text: string) {
+  return normalizeInlineText(text).slice(0, maxStudyPlanTaskLength);
+}
+
+function includesAny(text: string, keywords: string[]) {
+  return keywords.some((keyword) => text.includes(keyword));
 }
 
 function escapeRegExp(value: string) {
@@ -719,6 +844,26 @@ function extractLogId(detail: unknown) {
     return detail.logid;
   }
   return "";
+}
+
+function canUseLocalFallback(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes("[4028]") ||
+    message.includes("insufficient coze credits") ||
+    message.includes("credits balance") ||
+    message.includes("quota refresh") ||
+    message.includes("quota") ||
+    message.includes("abort") ||
+    message.includes("timeout") ||
+    message.includes("fetch failed") ||
+    message.includes("econnreset") ||
+    message.includes("etimedout")
+  );
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function safeReadText(response: Response) {

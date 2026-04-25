@@ -25,6 +25,10 @@ export async function POST(request: NextRequest) {
       return badRequest("缺少 study_days 或 daily_hours");
     }
 
+    if (!Number.isInteger(body.study_days) || !Number.isInteger(body.daily_hours)) {
+      return badRequest("study_days 和 daily_hours 必须是整数");
+    }
+
     const result = await generateStudyPlan({
       workflow2_result: body.workflow2_result,
       study_days: body.study_days,

@@ -1,192 +1,131 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { TopNav } from "@/components/top-nav";
+import type { ApiResponse } from "@/types/capability-profile";
+import type {
+  GenerateInterviewQuestionResponse,
+  InterviewQuestion,
+  PracticeMode,
+  QuestionType,
+  ReviewContent,
+  ReviewInterviewAnswerResponse
+} from "@/types/interview";
 
-type PracticeMode = "standard" | "weakness";
-type QuestionType =
-  | "self_intro"
-  | "project"
-  | "ai_product"
-  | "requirement"
-  | "behavior"
-  | "random";
+const userKey = "user001";
+const workflowStorageKey = "ai_pm_agent.workflow2_result";
 
-type InterviewQuestion = {
-  title: string;
-  typeLabel: string;
-  thinkTime: string;
-  focusPoints: string[];
-};
-
-type ReviewContent = {
-  strengths: string[];
-  answerKeyPoints: string[];
-  answerFramework: string[];
-  misses: string[];
-  suggestions: string[];
-  sampleAnswer: string;
-};
-
-const practiceModeOptions = [
-  { value: "standard" as const, label: "标准模拟" },
-  { value: "weakness" as const, label: "薄弱项强化" }
+const practiceModeOptions: Array<{ value: PracticeMode; label: string }> = [
+  { value: "standard", label: "标准练习" },
+  { value: "weakness", label: "短板强化" }
 ];
 
-const questionTypeOptions = [
-  { value: "self_intro" as const, label: "自我介绍题" },
-  { value: "project" as const, label: "项目题" },
-  { value: "ai_product" as const, label: "AI产品理解题" },
-  { value: "requirement" as const, label: "需求分析题" },
-  { value: "behavior" as const, label: "行为面试题" },
-  { value: "random" as const, label: "随机选项" }
+const questionTypeOptions: Array<{ value: QuestionType; label: string }> = [
+  { value: "self_intro", label: "自我介绍" },
+  { value: "project", label: "项目题" },
+  { value: "ai_product", label: "AI 产品题" },
+  { value: "requirement", label: "需求分析题" },
+  { value: "behavior", label: "行为题" },
+  { value: "random", label: "随机题" }
 ];
 
-const standardQuestionBank: Record<QuestionType, InterviewQuestion> = {
-  self_intro: {
-    title: "请用 1 分钟做一个和目标岗位高度相关的自我介绍，重点说明你为什么适合这个 AI 产品岗位。",
-    typeLabel: "自我介绍题",
-    thinkTime: "1 分钟",
-    focusPoints: ["岗位匹配度", "经历提炼", "表达结构"]
-  },
-  project: {
-    title:
-      "如果让你介绍一个最能体现产品能力的项目，你会怎么在 2 分钟内讲清背景、动作、结果，以及你个人的关键贡献？",
-    typeLabel: "项目题",
-    thinkTime: "2 分钟",
-    focusPoints: ["STAR 表达", "个人贡献", "结果量化"]
-  },
-  ai_product: {
-    title:
-      "你如何理解 GUI Agent 这类 AI 产品的价值？如果让你概括它和传统自动化工具的区别，你会怎么回答？",
-    typeLabel: "AI产品理解题",
-    thinkTime: "2 分钟",
-    focusPoints: ["AI 产品理解", "场景判断", "产品边界"]
-  },
-  requirement: {
-    title:
-      "如果让你为求职中的应届生设计一个 GUI Agent，帮助他们完成 JD 分析和备考计划生成，你会如何做需求分析，并决定第一版先做什么、不做什么？",
-    typeLabel: "需求分析题",
-    thinkTime: "6 分钟",
-    focusPoints: ["用户问题拆解", "需求优先级", "MVP 边界", "场景落地感"]
-  },
-  behavior: {
-    title:
-      "讲一个你在项目推进中遇到分歧的经历。你是如何和他人对齐目标、推动决策并保证结果落地的？",
-    typeLabel: "行为面试题",
-    thinkTime: "2 分钟",
-    focusPoints: ["沟通协作", "冲突处理", "推进力"]
-  },
-  random: {
-    title:
-      "假设你负责一个 AI 功能上线后的复盘，发现使用率很高但完成率偏低，你会怎么分析问题并提出优化方向？",
-    typeLabel: "随机题",
-    thinkTime: "3 分钟",
-    focusPoints: ["数据分析", "问题归因", "优化思路"]
-  }
+type StoredWorkflowInput = {
+  workflow1_result: string;
+  workflow2_result: string;
+  job_type?: string;
+  company_type?: string;
+  savedAt?: string;
 };
-
-const weaknessQuestion: InterviewQuestion = {
-  title:
-    "如果面试官追问你：你对 GUI Agent 的理解还不够系统，项目表达里也缺少指标拆解，你会如何在回答中补齐这两个短板并证明自己能快速胜任岗位？",
-  typeLabel: "薄弱项强化题",
-  thinkTime: "4 分钟",
-  focusPoints: ["短板自证", "指标拆解", "AI 产品理解", "表达补强"]
-};
-
-function buildReviewContent(question: InterviewQuestion, answer: string): ReviewContent {
-  const trimmedAnswer = answer.trim();
-  const tooShort = trimmedAnswer.length < 20;
-  const noisyAnswer = /^[a-z0-9\s.,!?]+$/i.test(trimmedAnswer) === false && trimmedAnswer.length < 12;
-  const shouldHideStrengthsAndMisses = !trimmedAnswer || tooShort || noisyAnswer;
-
-  const answerKeyPoints =
-    question.typeLabel === "需求分析题"
-      ? [
-          "先明确目标用户、核心场景和最痛的需求。",
-          "再拆需求优先级，解释为什么第一版只做 MVP。",
-          "最后补充验证方式、边界和后续扩展方向。"
-        ]
-      : [
-          "回答里要先给清晰结论，再展开核心论据。",
-          "用项目或具体场景支撑观点，不要只说抽象概念。",
-          "最后补一句结果、复盘或岗位适配度。"
-        ];
-
-  const answerFramework =
-    question.typeLabel === "项目题"
-      ? ["背景和目标", "我的动作", "结果和量化", "复盘和迁移"]
-      : ["先给结论", "拆 2-3 个关键点", "补案例或数据", "收束到岗位价值"];
-
-  const strengths = shouldHideStrengthsAndMisses
-    ? []
-    : [
-        "回答整体有主线，能围绕题目中心展开。",
-        "已经出现岗位相关关键词，说明你有意识往目标岗位靠。"
-      ];
-
-  const misses = shouldHideStrengthsAndMisses
-    ? []
-    : [
-        "答案里还缺少更明确的结构标记，容易让面试官抓不到重点。",
-        "举例和结果不够具体，缺少更强的说服力。"
-      ];
-
-  return {
-    strengths,
-    answerKeyPoints,
-    answerFramework,
-    misses,
-    suggestions: [
-      "先用一句话回答结论，再展开细节。",
-      "补一个更具体的项目或场景例子。",
-      "如果涉及项目，尽量讲清你的动作和结果，不要只讲团队。",
-      "把回答收束回岗位要求，体现匹配度。"
-    ],
-    sampleAnswer:
-      question.typeLabel === "需求分析题"
-        ? "我会先确认目标用户是正在求职的产品候选人，核心问题不是“信息不够多”，而是“无法把 JD 要求转成可执行准备动作”。所以第一版我会只做三个核心能力：JD 解析、差距识别、学习计划生成。优先不做复杂的社区、题库推荐和长链路协同，因为这些对 MVP 不是刚需。验证上我会先看用户是否能在 10 分钟内完成一次分析并拿到清晰备考行动项，再看学习计划的完成率和用户主观满意度。"
-        : "我会先给出结论，再用 2 到 3 个重点展开。如果是项目题，我会先交代背景和目标，再突出我个人负责的关键动作，用一两个数据结果证明价值，最后补一句复盘，说明我从这个项目里学到了什么，以及为什么这些经验能迁移到目标岗位。这样的回答更容易让面试官快速判断我的能力和岗位匹配度。"
-  };
-}
 
 export default function InterviewTrainingPage() {
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("standard");
   const [questionType, setQuestionType] = useState<QuestionType>("project");
+  const [workflowInput, setWorkflowInput] = useState<StoredWorkflowInput | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<InterviewQuestion | null>(null);
   const [answer, setAnswer] = useState("");
   const [review, setReview] = useState<ReviewContent | null>(null);
+  const [questionFallbackNotice, setQuestionFallbackNotice] = useState("");
+  const [reviewFallbackNotice, setReviewFallbackNotice] = useState("");
+  const [error, setError] = useState("");
   const [isGeneratingQuestion, setIsGeneratingQuestion] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const canSubmit = !isSubmitting;
-
+  const canGenerateQuestion = Boolean(workflowInput?.workflow2_result.trim()) && !isGeneratingQuestion;
+  const canSubmitAnswer = Boolean(currentQuestion) && answer.trim().length > 0 && !isSubmitting;
   const showQuestionTypeSelector = practiceMode === "standard";
   const questionMeta = useMemo(() => currentQuestion?.focusPoints ?? [], [currentQuestion]);
+  const sourceNotice = useMemo(() => buildSourceNotice(workflowInput), [workflowInput]);
+
+  useEffect(() => {
+    setWorkflowInput(readStoredWorkflowInput());
+  }, []);
 
   async function handleGenerateQuestion() {
+    if (!workflowInput?.workflow2_result.trim()) {
+      setError("请先完成 JD 分析，再来生成面试题。");
+      return;
+    }
+
     setIsGeneratingQuestion(true);
+    setError("");
     setReview(null);
+    setQuestionFallbackNotice("");
+    setReviewFallbackNotice("");
 
-    await new Promise((resolve) => setTimeout(resolve, 380));
+    try {
+      const response = await fetchJson<GenerateInterviewQuestionResponse>("/api/interview/question", {
+        method: "POST",
+        body: JSON.stringify({
+          practice_mode: practiceMode,
+          question_type: questionType,
+          workflow1_result: workflowInput.workflow1_result,
+          workflow2_result: workflowInput.workflow2_result,
+          target_role_direction: workflowInput.job_type ?? "",
+          user_key: userKey,
+          focus_on_weakness: practiceMode === "weakness"
+        })
+      });
 
-    const nextQuestion =
-      practiceMode === "weakness" ? weaknessQuestion : standardQuestionBank[questionType];
-
-    setCurrentQuestion(nextQuestion);
-    setAnswer("");
-    setIsGeneratingQuestion(false);
+      setCurrentQuestion(response.question);
+      setAnswer("");
+      setQuestionFallbackNotice(response.fallbackNotice ?? "");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "生成面试题失败");
+    } finally {
+      setIsGeneratingQuestion(false);
+    }
   }
 
   async function handleSubmitAnswer() {
-    if (!currentQuestion) {
+    if (!currentQuestion || !workflowInput?.workflow2_result.trim()) {
+      setError("请先生成题目并确保已带入 JD 分析结果。");
       return;
     }
 
     setIsSubmitting(true);
-    await new Promise((resolve) => setTimeout(resolve, 280));
-    setReview(buildReviewContent(currentQuestion, answer));
-    setIsSubmitting(false);
+    setError("");
+    setReviewFallbackNotice("");
+
+    try {
+      const response = await fetchJson<ReviewInterviewAnswerResponse>("/api/interview/review", {
+        method: "POST",
+        body: JSON.stringify({
+          current_question: currentQuestion.title,
+          currentquestionpoint: currentQuestion.questionPointsText,
+          question_type: currentQuestion.type,
+          user_answer: answer,
+          target_role_direction: workflowInput.job_type ?? "",
+          workflow2_result: workflowInput.workflow2_result
+        })
+      });
+
+      setReview(response.review);
+      setReviewFallbackNotice(response.fallbackNotice ?? "");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "答案点评失败");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -202,16 +141,16 @@ export default function InterviewTrainingPage() {
               </span>
             </h1>
             <p className="mt-3 max-w-3xl text-base leading-7 text-muted">
-              根据岗位要求和你的短板，生成更适合你的面试题。
+              用 Flow4 生成面试题，用 Flow5 点评你的回答，重点围绕 JD 差距项做针对性练习。
             </p>
           </div>
         </section>
 
         <div className="mx-auto flex max-w-[1280px] flex-col gap-4 px-6 py-6 lg:px-8 lg:py-7">
           <section className="rounded-[24px] border border-line bg-white p-4 shadow-card">
-            <div className="grid gap-3 xl:grid-cols-[240px_minmax(0,1fr)_144px]">
+            <div className="grid gap-3 xl:grid-cols-[240px_minmax(0,1fr)_156px]">
               <div>
-                <p className="text-sm font-medium text-[#555]">练习模式选择</p>
+                <p className="text-sm font-medium text-[#555]">练习模式</p>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {practiceModeOptions.map((item) => (
                     <button
@@ -231,7 +170,7 @@ export default function InterviewTrainingPage() {
               </div>
 
               <div>
-                <p className="text-sm font-medium text-[#555]">题目选择</p>
+                <p className="text-sm font-medium text-[#555]">题型选择</p>
                 {showQuestionTypeSelector ? (
                   <div className="mt-2 flex flex-wrap gap-2">
                     {questionTypeOptions.map((item) => (
@@ -251,7 +190,7 @@ export default function InterviewTrainingPage() {
                   </div>
                 ) : (
                   <div className="mt-2 rounded-2xl border border-dashed border-[#d9dce4] bg-[#fafbfd] px-4 py-3 text-sm text-muted">
-                    薄弱项强化模式下将根据薄弱项自动生成题目。
+                    短板强化模式会优先围绕差距分析中的高优先级短板出题。
                   </div>
                 )}
               </div>
@@ -259,23 +198,28 @@ export default function InterviewTrainingPage() {
               <button
                 type="button"
                 onClick={handleGenerateQuestion}
-                className="mt-6 h-12 rounded-2xl bg-[#1f3f73] px-5 text-sm font-medium text-white transition hover:bg-[#1a3560]"
+                disabled={!canGenerateQuestion}
+                className="mt-6 h-12 rounded-2xl bg-[#1f3f73] px-5 text-sm font-medium text-white transition hover:bg-[#1a3560] disabled:cursor-not-allowed disabled:bg-[#b6bfd0]"
               >
                 {isGeneratingQuestion ? "生成中..." : "生成题目"}
               </button>
             </div>
+
+            <p className="mt-3 text-sm leading-6 text-muted">{sourceNotice}</p>
+            {questionFallbackNotice ? <p className="mt-2 text-sm text-[#8a6c20]">{questionFallbackNotice}</p> : null}
+            {error ? <p className="mt-2 text-sm text-[#c24545]">{error}</p> : null}
           </section>
 
           <section className="rounded-[24px] border border-line bg-white p-4 shadow-card">
-            <h2 className="text-xl font-semibold">面试题目</h2>
+            <h2 className="text-xl font-semibold">当前面试题</h2>
             {currentQuestion ? (
               <>
                 <p className="mt-3 text-[22px] font-semibold leading-9 text-ink">{currentQuestion.title}</p>
                 <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted">
-                  <span>题目类型：{currentQuestion.typeLabel}</span>
+                  <span>题型：{currentQuestion.typeLabel}</span>
                   <span>建议思考时间：{currentQuestion.thinkTime}</span>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span>本题考查点：</span>
+                    <span>考点</span>
                     {questionMeta.map((item) => (
                       <span
                         key={item}
@@ -288,35 +232,36 @@ export default function InterviewTrainingPage() {
                 </div>
               </>
             ) : (
-              <EmptyState text="点击生成题目后，这里会展示题目正文、题目类型、建议思考时间和本题考查点。" />
+              <EmptyState text="生成题目后，这里会显示当前练习题以及它对应的核心考点。" />
             )}
           </section>
 
           <section className="rounded-[24px] border border-line bg-white p-4 shadow-card">
-            <h2 className="text-xl font-semibold">回答输入区</h2>
+            <h2 className="text-xl font-semibold">你的回答</h2>
             <textarea
               value={answer}
               onChange={(event) => setAnswer(event.target.value)}
-              placeholder="请输入你的回答"
-              className="mt-3 h-[116px] w-full resize-none rounded-2xl border border-[#d8dbe3] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#9ab3e8]"
+              placeholder="直接输入你的面试回答，越接近真实口述越好。"
+              className="mt-3 h-[132px] w-full resize-none rounded-2xl border border-[#d8dbe3] bg-white px-4 py-3 text-sm outline-none transition focus:border-[#9ab3e8]"
             />
             <button
               type="button"
               onClick={handleSubmitAnswer}
-              disabled={!currentQuestion || !canSubmit}
+              disabled={!canSubmitAnswer}
               className="mt-3 h-12 w-full rounded-2xl bg-[#1f3f73] px-5 text-sm font-medium text-white transition hover:bg-[#1a3560] disabled:cursor-not-allowed disabled:bg-[#b6bfd0]"
             >
-              {isSubmitting ? "提交中..." : "提交点评"}
+              {isSubmitting ? "点评中..." : "提交点评"}
             </button>
+            {reviewFallbackNotice ? <p className="mt-2 text-sm text-[#8a6c20]">{reviewFallbackNotice}</p> : null}
           </section>
 
           {review ? (
             <section className="rounded-[24px] border border-line bg-white p-4 shadow-card">
-              <h2 className="text-xl font-semibold">答案点评区</h2>
+              <h2 className="text-xl font-semibold">点评结果</h2>
 
               {review.strengths.length > 0 ? (
                 <article className="mt-3 rounded-2xl border border-[#f0e2a4] bg-[#fff7c8] p-4">
-                  <h3 className="text-base font-semibold text-[#7f6519]">回答亮点</h3>
+                  <h3 className="text-base font-semibold text-[#7f6519]">回答优点</h3>
                   <ul className="mt-2 space-y-2 text-sm leading-6 text-[#6d5a1f]">
                     {review.strengths.map((item) => (
                       <li key={item}>- {item}</li>
@@ -327,7 +272,7 @@ export default function InterviewTrainingPage() {
 
               <div className="mt-3 grid gap-3 xl:grid-cols-2">
                 <article className="rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4">
-                  <h3 className="text-base font-semibold">答案重点</h3>
+                  <h3 className="text-base font-semibold">这道题应该答到什么</h3>
                   <ul className="mt-2 space-y-2 text-sm leading-6 text-muted">
                     {review.answerKeyPoints.map((item) => (
                       <li key={item}>- {item}</li>
@@ -336,7 +281,7 @@ export default function InterviewTrainingPage() {
                 </article>
 
                 <article className="rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4">
-                  <h3 className="text-base font-semibold">答题思路</h3>
+                  <h3 className="text-base font-semibold">推荐回答框架</h3>
                   <ol className="mt-2 space-y-2 text-sm leading-6 text-muted">
                     {review.answerFramework.map((item, index) => (
                       <li key={item}>
@@ -349,7 +294,7 @@ export default function InterviewTrainingPage() {
 
               {review.misses.length > 0 ? (
                 <article className="mt-3 rounded-2xl border border-[#f0b2b7] bg-[#ffe7ea] p-4">
-                  <h3 className="text-base font-semibold text-[#9e3741]">错处漏处</h3>
+                  <h3 className="text-base font-semibold text-[#9e3741]">当前回答的缺口</h3>
                   <ul className="mt-2 space-y-2 text-sm leading-6 text-[#8d3d44]">
                     {review.misses.map((item) => (
                       <li key={item}>- {item}</li>
@@ -358,9 +303,9 @@ export default function InterviewTrainingPage() {
                 </article>
               ) : null}
 
-              <div className="mt-3 grid gap-3 xl:grid-cols-[0.78fr_1.22fr]">
+              <div className="mt-3 grid gap-3 xl:grid-cols-[0.82fr_1.18fr]">
                 <article className="rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4">
-                  <h3 className="text-base font-semibold">改进建议</h3>
+                  <h3 className="text-base font-semibold">优化建议</h3>
                   <ul className="mt-2 space-y-2 text-sm leading-6 text-muted">
                     {review.suggestions.map((item) => (
                       <li key={item}>- {item}</li>
@@ -369,7 +314,7 @@ export default function InterviewTrainingPage() {
                 </article>
 
                 <article className="rounded-2xl border border-[#e7e9ef] bg-[#fafbfd] p-4">
-                  <h3 className="text-base font-semibold">示例优化回答</h3>
+                  <h3 className="text-base font-semibold">参考答案</h3>
                   <p className="mt-2 text-sm leading-7 text-muted">{review.sampleAnswer}</p>
                 </article>
               </div>
@@ -379,6 +324,55 @@ export default function InterviewTrainingPage() {
       </main>
     </div>
   );
+}
+
+async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  const response = await fetch(input, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {})
+    }
+  });
+  const result = (await response.json()) as ApiResponse<T>;
+  if (!response.ok || !result.success) {
+    throw new Error(result.success ? "请求失败" : result.error);
+  }
+  return result.data;
+}
+
+function readStoredWorkflowInput(): StoredWorkflowInput | null {
+  try {
+    const rawValue = window.sessionStorage.getItem(workflowStorageKey);
+    if (!rawValue) {
+      return null;
+    }
+
+    const parsed = JSON.parse(rawValue) as Partial<StoredWorkflowInput>;
+    if (typeof parsed.workflow2_result !== "string" || !parsed.workflow2_result.trim()) {
+      return null;
+    }
+
+    return {
+      workflow1_result: typeof parsed.workflow1_result === "string" ? parsed.workflow1_result : "",
+      workflow2_result: parsed.workflow2_result,
+      job_type: typeof parsed.job_type === "string" ? parsed.job_type : "",
+      company_type: typeof parsed.company_type === "string" ? parsed.company_type : "",
+      savedAt: typeof parsed.savedAt === "string" ? parsed.savedAt : ""
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildSourceNotice(input: StoredWorkflowInput | null) {
+  if (!input?.workflow2_result.trim()) {
+    return "请先去 JD 分析页完成分析，面试训练会自动读取 Workflow1 和 Workflow2 的结果。";
+  }
+
+  const tags = [input.job_type, input.company_type].map((item) => item?.trim()).filter(Boolean);
+  const suffix = tags.length > 0 ? `（${tags.join(" / ")}）` : "";
+  return `已读取上一页 JD 分析结果${suffix}，Flow4 会基于这些上下文出题，Flow5 会结合差距分析做点评。`;
 }
 
 function EmptyState({ text }: { text: string }) {
